@@ -23,5 +23,9 @@ public enum FailureReason {
     /** 终态：执行超时且重试耗尽 */
     TIMEOUT,
     /** 终态：用户主动取消 */
-    CANCELLED_BY_USER
+    CANCELLED_BY_USER,
+    /** 提交被拒绝：调度器已停止（排空或关闭后不再受理新任务） */
+    SCHEDULER_STOPPED,
+    /** 终态：优雅停止排空截止时仍未运行，被收尾取消 */
+    SCHEDULER_SHUTDOWN
 }

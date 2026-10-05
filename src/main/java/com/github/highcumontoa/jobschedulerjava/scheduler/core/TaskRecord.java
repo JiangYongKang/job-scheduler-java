@@ -23,6 +23,8 @@ class TaskRecord {
     boolean quotaHeld = false;
     /** 本次尝试的开始时间（超时判定依据） */
     long attemptStartMillis = 0L;
+    /** 本次进入 QUEUED 的时间（排队老化与先到先得的判定依据） */
+    long queuedAtMillis = 0L;
     /** 当前执行句柄 */
     volatile Future<?> runningFuture;
 
@@ -36,6 +38,7 @@ class TaskRecord {
     }
 
     TaskSnapshot toSnapshot() {
-        return new TaskSnapshot(definition.taskId(), definition.queue(), status, reason, attempts);
+        return new TaskSnapshot(definition.taskId(), definition.queue(), status, reason, attempts,
+                definition.priority());
     }
 }

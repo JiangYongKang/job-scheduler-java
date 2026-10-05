@@ -39,10 +39,11 @@ BLOCKED                            ▼
 
 `FailureReason` 取值互斥、可区分，覆盖提交拒绝与运行期终态两类：
 
-- 提交拒绝：`DUPLICATE_TASK`、`UNKNOWN_DEPENDENCY`、`DEPENDENCY_CYCLE`
+- 提交拒绝：`DUPLICATE_TASK`、`UNKNOWN_DEPENDENCY`、`DEPENDENCY_CYCLE`、
+  `SCHEDULER_STOPPED`（调度器排空/停止后不再受理）
 - 终态原因：`QUOTA_REJECTED`（配额拒绝）、`DEPENDENCY_FAILED`、`DEPENDENCY_CANCELLED`
   （依赖失败/取消）、`RETRY_EXHAUSTED`（重试耗尽）、`TIMEOUT`（超时）、
-  `CANCELLED_BY_USER`（用户取消）
+  `CANCELLED_BY_USER`（用户取消）、`SCHEDULER_SHUTDOWN`（优雅停止收尾取消）
 
 ## 配额语义
 
@@ -65,6 +66,51 @@ BLOCKED                            ▼
 - 重复提交同一 `taskId` 被拒绝（`DUPLICATE_TASK`）；取消、重试、超时中断均幂等，
   不产生重复的对外可见效果（同一任务每次尝试只执行一次 handler）。
 
+## 队列暂停/恢复
+
+- `pauseQueue(queue)` 后，调度器不再向该队列**派发**新任务；`resumeQueue(queue)` 后
+  被压住的排队任务继续参与调度。两者均幂等，暂停只影响指定队列。
+- 暂停期间语义与正常情况一致：
+  - 提交/批量提交照常受理（任务停留在 `PENDING`/`QUEUED`）；
+  - 正在运行的任务按原规则自然结束或超时，超时与失败的重试照常发生，
+    只是重试后回到 `QUEUED` 等待恢复；
+  - 取消照常生效（`CANCELLED/CANCELLED_BY_USER`），依赖编排照常推进。
+- 同一任务不会被重复派发（每次尝试恰好执行一次 handler），配额在暂停/恢复
+  过程中不会重复计扣或漏回收；恢复后同优先级任务保持暂停前的排队顺序（FIFO）。
+
+## 优先级与等待老化
+
+- 提交时可携带 `priority`（`TaskDefinition.of(..., priority, handler)`，旧签名默认 0），
+  数值越大越优先；**只影响同队列内的排队顺序**，不影响已运行任务，也不突破
+  队列并发与资源限制，拒绝型队列满员时高优先级任务照样被 `QUOTA_REJECTED` 拒绝。
+- 调度顺序：等效优先级高者优先；并列时先进入 `QUEUED` 者优先（完全并列保持提交顺序）。
+- 老化（anti-starvation）：等效优先级 = `priority + 等待时长 / agingIntervalMillis`
+  （构造器可配，默认 1000ms，`<=0` 关闭）。等待越久提升越多，低优先级任务
+  不会被持续到来的高优先级任务无限期压住。
+- 重试重新排队视为新的排队（等待时长重新计时）。
+
+## 优雅停止/排空
+
+- `shutdownGracefully(graceMillis)`：
+  1. 立即进入排空阶段，不再受理新任务——`submit`/`submitBatch` 返回
+     `SCHEDULER_STOPPED` 拒绝（带可读说明，不静默丢弃）；
+  2. 存量任务在宽限期内按原规则继续调度：排队任务仍会派发、失败/超时仍重试、
+     取消仍生效；
+  3. 到达截止时间仍未结束的 `RUNNING` 任务按超时逻辑收尾为 `FAILED/TIMEOUT`
+     （中断执行线程、恰好释放一次配额、不再重试）；仍处于 `PENDING`/`QUEUED`
+     的任务收尾为 `CANCELLED/SCHEDULER_SHUTDOWN`，与用户取消可区分。
+- 返回时保证：所有任务均为终态（完成/失败/取消可区分）、配额全部释放、
+  调度线程与工作线程池已停止。方法幂等，重复调用直接返回。
+- `shutdown()` 为立即硬停止（同样使后续提交被拒绝）；Spring 装配仍使用
+  `shutdown` 作为 destroyMethod。
+
+## 与既有能力的兼容范围
+
+- 暂停/恢复、优先级、优雅停止均建立在原有编排、配额、重试、超时规则之上，
+  不改变其判定逻辑；`TaskDefinition.of` 旧签名（无 priority）行为与之前完全一致。
+- 暂停与排空可叠加：排空期内暂停的队列不会派发，截止时其排队任务按
+  `SCHEDULER_SHUTDOWN` 收尾。
+
 ## 代码结构
 
 ```
@@ -82,7 +128,7 @@ scheduler/
 # 编译
 mvn compile
 
-# 全部测试（22 个用例）
+# 全部测试（37 个用例）
 mvn test
 
 # 按场景运行
@@ -91,6 +137,9 @@ mvn test -Dtest=QuotaBoundaryTest          # 配额边界：排队 vs 拒绝、�
 mvn test -Dtest=DependencyFailureTest      # 依赖失败/取消传播
 mvn test -Dtest=RetryAndTimeoutTest        # 重试耗尽与超时
 mvn test -Dtest=ConcurrentSubmissionTest   # 并发提交、取消幂等、不超发
+mvn test -Dtest=QueuePauseResumeTest       # 暂停/恢复：并发提交、超时重试、顺序保持
+mvn test -Dtest=PriorityQueueingTest       # 优先级排序、等待老化、满员拒绝、并发上限
+mvn test -Dtest=GracefulShutdownTest       # 优雅停止：排空、超时收尾、停止后拒绝
 ```
 
 每个测试用例的日志都会打印**输入**（任务拓扑、配额配置、并发参数）与

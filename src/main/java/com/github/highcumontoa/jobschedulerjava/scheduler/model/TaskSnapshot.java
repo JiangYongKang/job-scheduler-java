@@ -8,5 +8,6 @@ public record TaskSnapshot(
         String queue,
         TaskStatus status,
         FailureReason reason,
-        int attempts) {
+        int attempts,
+        int priority) {
 }
