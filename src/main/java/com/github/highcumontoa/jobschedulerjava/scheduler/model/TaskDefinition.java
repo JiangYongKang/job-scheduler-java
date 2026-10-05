@@ -11,6 +11,7 @@ import java.util.Set;
  * @param cost          资源占用单位数
  * @param maxRetries    失败/超时后最大重试次数（不含首次执行）
  * @param timeoutMillis 单次执行超时时间（毫秒），<=0 表示不限制
+ * @param priority      排队优先级（数值越大越优先，仅影响同队列内的排队顺序）
  * @param handler       执行体
  */
 public record TaskDefinition(
@@ -20,6 +21,7 @@ public record TaskDefinition(
         int cost,
         int maxRetries,
         long timeoutMillis,
+        int priority,
         TaskHandler handler) {
 
     public TaskDefinition {
@@ -32,8 +34,16 @@ public record TaskDefinition(
         }
     }
 
+    /** 兼容入口：默认优先级 0。 */
     public static TaskDefinition of(String taskId, String queue, Set<String> dependencies,
                                     int cost, int maxRetries, long timeoutMillis, TaskHandler handler) {
-        return new TaskDefinition(taskId, queue, dependencies, cost, maxRetries, timeoutMillis, handler);
+        return new TaskDefinition(taskId, queue, dependencies, cost, maxRetries, timeoutMillis, 0, handler);
+    }
+
+    public static TaskDefinition of(String taskId, String queue, Set<String> dependencies,
+                                    int cost, int maxRetries, long timeoutMillis,
+                                    int priority, TaskHandler handler) {
+        return new TaskDefinition(taskId, queue, dependencies, cost, maxRetries, timeoutMillis,
+                priority, handler);
     }
 }

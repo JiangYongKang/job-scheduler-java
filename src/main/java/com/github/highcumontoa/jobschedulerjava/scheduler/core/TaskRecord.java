@@ -23,6 +23,8 @@ class TaskRecord {
     boolean quotaHeld = false;
     /** 本次尝试的开始时间（超时判定依据） */
     long attemptStartMillis = 0L;
+    /** 首次进入 QUEUED 的时间（优先级老化依据，重试重新排队时保留以持续累计等待） */
+    long queuedSinceMillis = 0L;
     /** 当前执行句柄 */
     volatile Future<?> runningFuture;
 
