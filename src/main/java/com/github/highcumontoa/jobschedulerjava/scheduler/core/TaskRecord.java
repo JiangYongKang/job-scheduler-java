@@ -25,6 +25,12 @@ class TaskRecord {
     long attemptStartMillis = 0L;
     /** 本次进入 QUEUED 的时间（排队老化与先到先得的判定依据） */
     long queuedAtMillis = 0L;
+    /**
+     * 执行序号：每次派发递增，唯一标识一次执行。
+     * 执行体回报结果时必须携带派发时的序号，序号不匹配即为迟到结果，一律忽略，
+     * 保证一次执行的结果只被它自己那一次采纳。
+     */
+    long executionSeq = 0L;
     /** 当前执行句柄 */
     volatile Future<?> runningFuture;
 

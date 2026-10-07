@@ -39,6 +39,9 @@ import java.util.concurrent.TimeUnit;
  * - 优雅停止：shutdownGracefully 停止受理新任务（提交返回 SCHEDULER_STOPPED），
  *   宽限期内存量任务按原规则排空；截止后 RUNNING 按 FAILED/TIMEOUT 收尾、
  *   PENDING/QUEUED 按 CANCELLED/SCHEDULER_SHUTDOWN 收尾，返回时无中间状态、无配额占用。
+ * - 结果归属：每次派发生成递增的执行序号，执行结果只被序号匹配且仍在 RUNNING 的
+ *   那一次执行采纳；已超时/已取消/已收尾的执行若之后仍返回（执行体未响应中断），
+ *   其迟到结果一律忽略，不改变任务状态、不代替其他执行归还配额。
  * - 任何路径下成功占用的配额在尝试结束（成功/失败/重试/超时/取消）时恰好释放一次。
  */
 public class LocalJobScheduler {
@@ -478,10 +481,14 @@ public class LocalJobScheduler {
             record.attemptStartMillis = System.currentTimeMillis();
             record.dispatched = true;
             record.quotaHeld = true;
+            // 执行序号唯一标识本次派发，执行体回报结果时凭序号归属到这一次执行
+            record.executionSeq++;
+            final long seq = record.executionSeq;
             // 持锁提交并记录句柄，保证超时/取消总能拿到本次尝试的 Future
-            record.runningFuture = workers.submit(() -> executeAttempt(record.definition.taskId()));
-            log.info("quota acquired: task={} queue={} attempt={} cost={}",
-                    record.definition.taskId(), queue, record.attempts,
+            record.runningFuture = workers.submit(
+                    () -> executeAttempt(record.definition.taskId(), seq));
+            log.info("quota acquired: task={} queue={} attempt={} seq={} cost={}",
+                    record.definition.taskId(), queue, record.attempts, seq,
                     record.definition.cost());
         } else if (quotaManager.isRejectWhenFull(queue)) {
             record.status = TaskStatus.FAILED;
@@ -528,11 +535,15 @@ public class LocalJobScheduler {
 
     // ------------------------------------------------------------- 执行
 
-    private void executeAttempt(String taskId) {
+    private void executeAttempt(String taskId, long seq) {
         TaskDefinition definition;
         synchronized (this) {
             TaskRecord record = records.get(taskId);
-            if (record == null || record.status != TaskStatus.RUNNING) {
+            // 仅当本次执行仍是记录的当前执行时才运行执行体：
+            // 超时/取消/排空可能已把记录推进到下一次执行或终态
+            if (record == null || record.status != TaskStatus.RUNNING
+                    || record.executionSeq != seq) {
+                log.info("stale execution skipped before run: task={} seq={}", taskId, seq);
                 return;
             }
             definition = record.definition;
@@ -547,18 +558,25 @@ public class LocalJobScheduler {
         // 完成回调统一串行化到调度器锁上，避免与超时/取消竞争
         try {
             synchronized (this) {
-                reportOutcome(taskId, outcome);
+                reportOutcome(taskId, seq, outcome);
             }
         } catch (Throwable t) {
-            log.error("report outcome failed: task={}", taskId, t);
+            log.error("report outcome failed: task={} seq={}", taskId, seq, t);
         }
     }
 
-    private void reportOutcome(String taskId, Throwable error) {
+    private void reportOutcome(String taskId, long seq, Throwable error) {
         TaskRecord record = records.get(taskId);
-        // 仅当该尝试仍在运行态时采纳结果；超时/取消已先行转移状态，迟到结果被丢弃，
-        // 因此不会重复释放配额或重复改变终态。
-        if (record == null || record.status != TaskStatus.RUNNING) {
+        // 结果归属规则：只有“序号匹配且仍处于 RUNNING”的那一次执行才能采纳自己的结果。
+        // 该次执行一旦已被判超时、被取消或已被排空收尾，记录会转移到 QUEUED/终态或
+        // 推进到下一次执行（序号递增），此后到达的迟到结果一律忽略——
+        // 不改变任务状态、不释放配额（配额已在超时/取消/收尾时恰好释放一次）。
+        if (record == null || record.status != TaskStatus.RUNNING
+                || record.executionSeq != seq) {
+            log.info("late outcome ignored: task={} seq={} currentSeq={} status={} error={}",
+                    taskId, seq, record == null ? -1 : record.executionSeq,
+                    record == null ? "NOT_FOUND" : record.status,
+                    error == null ? "SUCCESS" : error.toString());
             return;
         }
         if (error == null) {
